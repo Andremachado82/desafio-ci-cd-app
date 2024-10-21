@@ -1,11 +1,80 @@
 stages:
   - test
+  - build
+  - deploy
 
+variables:
+  DOCKER_IMAGE: denilsonbonatti/gitlab-cicd-node
+  DOCKER_TAG: 1.0
+  DOCKER_VERSION: docker:20.10.16
+  SSH_KEY: $SSH_PRIVATE_KEY
+  GCP_HOST: 35.198.57.187
+  GCP_USER: gcp
+
+# Job de testes
 realizar_testes:
   stage: test
-  image: node:20.7.0-alpine3.17
+  image: node:17-alpine3.14
   before_script:
     - cd app/
     - npm install
   script:
     - npm test
+  artifacts:
+    when: always
+    reports:
+      junit: app/junit.xml
+  only:
+    - main
+    - develop
+
+# Job para build da imagem Docker
+build_images:
+  stage: build
+  needs:
+    - realizar_testes
+  image: $DOCKER_VERSION
+  services:
+    - $DOCKER_VERSION-dind
+
+  variables:
+    DOCKER_TLS_CERTDIR: '/certs'
+
+  before_script:
+    - docker login -u $REGISTRY_USER -p $REGISTRY_PASS
+
+  script:
+    - docker build -t $DOCKER_IMAGE:$DOCKER_TAG .
+    - docker push $DOCKER_IMAGE:$DOCKER_TAG
+  only:
+    - main
+    - develop
+
+# Deploy no ambiente de desenvolvimento local (Docker)
+deploy_dev_local:
+  stage: deploy
+  needs:
+    - build_images
+  image: $DOCKER_VERSION
+  script:
+    - docker run -d --name nodeapp -p 3000:3000 $DOCKER_IMAGE:$DOCKER_TAG
+  only:
+    - main
+    - develop
+
+# Deploy no Kubernetes no GCP
+deploy_gcp:
+  stage: deploy
+  needs:
+    - build_images
+  before_script:
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - chmod 400 $SSH_KEY
+  script:
+    - ssh -o StrictHostKeyChecking=no -i $SSH_KEY $GCP_USER@$GCP_HOST "
+      sudo rm -Rf /app && \
+      sudo git clone --branch kubernetes https://gitlab.com/denilsonbonatti/gitlab-cicd-app-base.git /app && \
+      cd /app && \
+      kubectl apply -f deployment.yml  "
+  only:
+    - kubernetes
